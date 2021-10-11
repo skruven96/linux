@@ -4,7 +4,7 @@
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
-// My comment
+
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/sched/autogroup.h>
