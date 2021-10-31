@@ -912,18 +912,11 @@ static blk_qc_t __submit_bio(struct bio *bio)
 	struct gendisk *disk = bio->bi_bdev->bd_disk;
 	blk_qc_t ret = BLK_QC_T_NONE;
 
-	if (unlikely(bio_queue_enter(bio) != 0))
-		return BLK_QC_T_NONE;
-
-	if (!submit_bio_checks(bio) || !blk_crypto_bio_prep(&bio))
-		goto queue_exit;
-	if (disk->fops->submit_bio) {
+	if (blk_crypto_bio_prep(&bio)) {
+		if (!disk->fops->submit_bio)
+			return blk_mq_submit_bio(bio);
 		ret = disk->fops->submit_bio(bio);
-		goto queue_exit;
 	}
-	return blk_mq_submit_bio(bio);
-
-queue_exit:
 	blk_queue_exit(disk->queue);
 	return ret;
 }
@@ -961,6 +954,9 @@ static blk_qc_t __submit_bio_noacct(struct bio *bio)
 		struct request_queue *q = bio->bi_bdev->bd_disk->queue;
 		struct bio_list lower, same;
 
+		if (unlikely(bio_queue_enter(bio) != 0))
+			continue;
+
 		/*
 		 * Create a fresh bio_list for all subordinate requests.
 		 */
@@ -996,12 +992,23 @@ static blk_qc_t __submit_bio_noacct(struct bio *bio)
 static blk_qc_t __submit_bio_noacct_mq(struct bio *bio)
 {
 	struct bio_list bio_list[2] = { };
-	blk_qc_t ret;
+	blk_qc_t ret = BLK_QC_T_NONE;
 
 	current->bio_list = bio_list;
 
 	do {
-		ret = __submit_bio(bio);
+		struct gendisk *disk = bio->bi_bdev->bd_disk;
+
+		if (unlikely(bio_queue_enter(bio) != 0))
+			continue;
+
+		if (!blk_crypto_bio_prep(&bio)) {
+			blk_queue_exit(disk->queue);
+			ret = BLK_QC_T_NONE;
+			continue;
+		}
+
+		ret = blk_mq_submit_bio(bio);
 	} while ((bio = bio_list_pop(&bio_list[0])));
 
 	current->bio_list = NULL;
@@ -1019,6 +1026,9 @@ static blk_qc_t __submit_bio_noacct_mq(struct bio *bio)
  */
 blk_qc_t submit_bio_noacct(struct bio *bio)
 {
+	if (!submit_bio_checks(bio))
+		return BLK_QC_T_NONE;
+
 	/*
 	 * We only want one ->submit_bio to be active at a time, else stack
 	 * usage with stacked devices could be a problem.  Use current->bio_list
